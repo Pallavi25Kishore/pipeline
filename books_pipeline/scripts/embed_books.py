@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 embed_books.py - Book Chunking and Embedding
 
