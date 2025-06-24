@@ -355,7 +355,5 @@ def main():
     # Step 6: Save outputs and create indexes
     save_final_outputs(embeddings, metadata)
 
-    print(f"\n➡️  Next step: python scripts/05_load_to_db.py")
-
 if __name__ == "__main__":
     main()
