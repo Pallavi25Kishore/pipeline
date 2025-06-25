@@ -108,3 +108,5 @@ output/**/*
 # Allow sample files (if any)
 !input/csv/sample.csv
 !input/pdfs/sample.pdf
+
+.env
