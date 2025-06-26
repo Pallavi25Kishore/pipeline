@@ -5,7 +5,7 @@ A complete pipeline for processing books from PDF to searchable embeddings.
 ## Pipeline Overview
 
 ```
-CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index → Database
+CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index → Database → Whoosh Index
 ```
 
 ## Quick Start
@@ -15,6 +15,7 @@ CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index
    ```bash
    cd books_pipeline
    pip install -r requirements.txt
+   pip install Whoosh  # For keyword search
    ```
 
 2. **Install system dependencies:**
@@ -25,15 +26,40 @@ CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index
 3. **Add your files:**
 
    - Place CSV file in `input/csv/`
-   - Place PDF files in `input/pdfs/`
+   - Place PDF files in `input/pdfs/` (ensure filename in csv matches the pdf filename)
 
-4. **Run pipeline:**
+4. **Set up database credentials:**
    ```bash
-   python scripts/01_ocr_books.py      # OCR processing
-   python scripts/02_clean_texts.py    # Text cleaning
-   python scripts/03_embed_books.py    # Create embeddings
-   python scripts/04_create_indexes.py # Build FAISS indexes
-   python scripts/05_load_to_db.py     # Load to database
+   # Create .env file in books_pipeline/
+   echo "DB_NAME=books" > .env
+   echo "DB_USER=your_username" >> .env
+   echo "DB_PASSWORD=your_password" >> .env
+   echo "DB_HOST=localhost" >> .env
+   echo "DB_PORT=5432" >> .env
+
+5. **Run pipeline:**
+   ```bash
+   # Step 1-5: Run pipeline scripts
+   python3 scripts/ocr.py      # OCR processing
+   python3 scripts/clean_txt.py    # Text cleaning
+   python3 scripts/embed_books.py    # Create embeddings
+   python3 scripts/create_faiss_indexes.py # Build FAISS indexes
+   python3 manage.py load_books     # Load to database
+   python3 scripts/create_whoosh_index.py # Build Whoosh index
+
+   # Step 6: Set up Django database
+   cd books_project
+   python3 manage.py makemigrations
+   python3 manage.py migrate
+   python3 manage.py createsuperuser          # Optional: create admin user
+
+   # Step 7: Load data
+   python3 manage.py load_books --dry-run     # Test first
+   python3 manage.py load_books               # Load for real
+
+   # Step 8: Start web server
+   python3 manage.py runserver 0.0.0.0:8000  # External access
+   # Visit: http://your-server-ip:8000/admin/
    ```
 
 ## Directory Structure
@@ -50,7 +76,14 @@ books_pipeline/
 ├── output/
 │   ├── embeddings/    # Final embedding arrays
 │   ├── ids/           # Metadata mappings
-│   └── indexes/       # FAISS indexes
+│   ├── indexes/       # FAISS indexes
+│   └── whoosh/        # Whoosh BM25 indexes
+├── books_project/     # Django project
+│   ├── manage.py
+│   └── APIapp/
+│       └── management/
+│           └── commands/
+│               └── load_books.py
 ├── scripts/           # Processing scripts
 ├── logs/              # Processing logs
 ├── config.py          # Configuration
@@ -87,10 +120,16 @@ Example embed_id_dict:
 }
 ```
 
-## Next Steps
+FAISS Vector Search Files (output):
 
-After setup, run the first script:
+output/indexes/books_flat_ip_YYYY-MM-DD.index - FAISS vector index
+output/indexes/books_hnsw_YYYY-MM-DD.index - FAISS vector index
+output/ids/books_metadata_YYYY-MM-DD.pkl - Pickle file mapping vector positions to chunk metadata
+output/embeddings/books_embeddings_YYYY-MM-DD.npy - Raw embedding arrays
 
-```bash
-python scripts/01_ocr_books.py
-```
+Whoosh Keyword Search Files (output):
+
+output/whoosh/books_whoosh_YYYY-MM-DD/ - Directory containing Whoosh BM25 index files
+output/whoosh/index_metadata.json - Index creation metadata
+
+
