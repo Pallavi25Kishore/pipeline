@@ -140,8 +140,14 @@ def process_cleaned_jsons():
 
     json_files = [f for f in os.listdir(input_dir) if f.endswith('.json')]
 
+    completed_json_files = check_existing_embeddings()
+    if completed_json_files:
+        print(f"Found {len(completed_json_files)} books with existing embeddings")
+        json_files = [f for f in json_files if f not in completed_json_files]
+        print(f"Will process {len(json_files)} new books")
+
     if not json_files:
-        print(f"No JSON files found in {input_dir}")
+        print("No new JSON files to process - all books already have embeddings!")
         return None
 
     print(f"Loading {len(json_files)} cleaned JSON files...")
@@ -193,7 +199,12 @@ def check_existing_embeddings():
 
     # Find the most recent CSV (with or without embeddings)
     csv_files.sort()
-    csv_file = csv_files[-1]  # Use latest CSV
+    embedding_csvs = [f for f in csv_files if 'embedding' in f.lower()]
+    if embedding_csvs:
+        csv_file = embedding_csvs[-1]
+    else:
+        csv_file = csv_files[-1]
+
     csv_path = os.path.join(csv_dir, csv_file)
 
     try:
@@ -218,7 +229,7 @@ def check_existing_embeddings():
 
             return completed_json_files
     except Exception as e:
-        print(f"⚠️  Could not read CSV: {e}")
+        print(f"Could not read CSV: {e}")
 
     return set()
 
