@@ -44,12 +44,12 @@ CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index
    python3 scripts/clean_txt.py    # Text cleaning
    python3 scripts/embed_books.py    # Create embeddings
    python3 scripts/create_faiss_indexes.py # Build FAISS indexes
-   python3 manage.py load_books     # Load to database
    python3 scripts/create_whoosh_index.py # Build Whoosh index
+   python3 manage.py load_books     # Load to database
 
    # Step 6: Set up Django database
    cd books_project
-   python3 manage.py makemigrations
+   python3 manage.py makemigrations #only if model is changed otherwise skip this step
    python3 manage.py migrate
    python3 manage.py createsuperuser          # Optional: create admin user
 

@@ -482,7 +482,7 @@ def main():
 
     print(f"\nEmbedding Pipeline Complete!")
     print(f"Updated CSV: {updated_csv}")
-    print(f"Embeddings saved for FAISS index creation")
+    print(f"Embeddings saved for FAISS and Whoosh index creation")
 
 if __name__ == "__main__":
     main()
