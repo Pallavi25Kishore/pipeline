@@ -9,6 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Load .env from books_pipeline/ directory (parent of books_project)
 load_dotenv(BASE_DIR.parent / '.env')
 
+SECRET_KEY = 'django-insecure-development-key-change-in-production'
+
 DEBUG = True
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '*']
