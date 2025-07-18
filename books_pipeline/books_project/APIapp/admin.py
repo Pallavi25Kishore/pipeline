@@ -17,15 +17,15 @@ class BooksAdmin(admin.ModelAdmin):
         'filename',
         'has_embeddings_display',
         'chunk_count_display',
-        'created_at'
+        # 'created_at'
     ]
 
     list_filter = [
         'importance',
         'topic',
         'g_books_language',
-        'created_at',
-        'updated_at'
+        # 'created_at',
+        # 'updated_at'
     ]
 
     search_fields = [
@@ -38,8 +38,8 @@ class BooksAdmin(admin.ModelAdmin):
     ]
 
     readonly_fields = [
-        'created_at',
-        'updated_at',
+        # 'created_at',
+        # 'updated_at',
         'has_embeddings_display',
         'chunk_count_display'
     ]
@@ -111,13 +111,13 @@ class BooksAdmin(admin.ModelAdmin):
                 'embed_filename'
             ),
         }),
-        ('Metadata', {
-            'fields': (
-                'created_at',
-                'updated_at'
-            ),
-            'classes': ('collapse',)
-        }),
+        # ('Metadata', {
+        #     'fields': (
+        #         'created_at',
+        #         'updated_at'
+        #     ),
+        #     'classes': ('collapse',)
+        # }),
     )
 
     def has_embeddings_display(self, obj):

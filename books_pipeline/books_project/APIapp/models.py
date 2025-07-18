@@ -9,6 +9,7 @@ class Books(models.Model):
     # ========================================================================
     # CORE METADATA
     # ========================================================================
+    id = models.AutoField(primary_key=True)
     book_id = models.IntegerField(
         null=True,
         blank=True,
@@ -213,11 +214,11 @@ class Books(models.Model):
         help_text="Reference filename for embeddings"
     )
 
-    # ========================================================================
-    # METADATA
-    # ========================================================================
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    # # ========================================================================
+    # # METADATA
+    # # ========================================================================
+    # created_at = models.DateTimeField(auto_now_add=True)
+    # updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'books'
