@@ -51,7 +51,7 @@ def process_pdf_file(args):
 		timing_info["cv"] = time.time()
 
 		# Get filename for outputs
-		filename = os.path.basename(file).split(".")[0]
+		filename = os.path.splitext(os.path.basename(file))[0]
 
 		# Create output directory for text files
 		if not os.path.exists(os.path.join(out, 'txts', filename)):
@@ -95,7 +95,7 @@ if __name__ == "__main__":
 
 	# Get PDF files to process
 	try:
-		files = [os.path.join('./input/pdfs', filename) for filename in os.listdir("./input/pdfs") if filename.endswith('.pdf')]
+		files = [os.path.join('./input/pdfs', filename) for filename in os.listdir("./input/pdfs") if filename.lower().endswith('.pdf')]
 	except FileNotFoundError:
 		print("Error: ./input/pdfs directory not found!")
 		print("Make sure you have PDFs in the input/pdfs/ folder")
@@ -107,6 +107,62 @@ if __name__ == "__main__":
 		sys.exit(1)
 
 	print(f"Found {len(files)} PDF files to process")
+
+
+	print("\nChecking CSV and PDF name matching...")
+	csv_dir = './input/csv'
+	csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+
+	if not csv_files:
+			print(" ERROR: No CSV file found in ./input/csv/")
+			print("Please add a CSV file with book metadata")
+			sys.exit(1)
+
+	# Read the first CSV file
+	csv_path = os.path.join(csv_dir, csv_files[0])
+	print(f"Reading CSV: {csv_files[0]}")
+
+	try:
+			df = pd.read_csv(csv_path)
+
+			# Get PDF names (without path, with extension)
+			pdf_names = set([os.path.basename(f) for f in files])
+
+			# Get CSV filenames - handle both with and without .pdf extension
+			csv_filenames = []
+			for f in df['filename']:
+					f = str(f)
+					if not f.lower().endswith('.pdf'):
+							f = f + '.pdf'
+					csv_filenames.append(f)
+			csv_filenames = set(csv_filenames)
+
+			# Check only if PDFs are missing from CSV (not the other way)
+			pdfs_not_in_csv = pdf_names - csv_filenames
+
+			if pdfs_not_in_csv:
+					print("\n ERROR: Some PDFs are not listed in the CSV!")
+					print(f"\n PDFs found but NOT in CSV ({len(pdfs_not_in_csv)}):")
+					for pdf in sorted(pdfs_not_in_csv):
+							print(f"   - {pdf}")
+
+					print("\n🔧 To fix this:")
+					print("   1. Add these PDFs to the CSV 'filename' column")
+					print("   2. Or remove these PDFs from input/pdfs/")
+					print("\nOCR process ABORTED. All PDFs must be in the CSV.")
+					sys.exit(1)
+
+			# Just inform about CSV entries without PDFs (don't fail)
+			csv_not_in_pdfs = csv_filenames - pdf_names
+			if csv_not_in_pdfs:
+					print(f"\n  Note: {len(csv_not_in_pdfs)} CSV entries don't have PDFs yet (this is OK)")
+
+			print(f" All {len(pdf_names)} PDFs are listed in CSV. Proceeding with OCR...")
+
+	except Exception as e:
+			print(f" ERROR reading CSV file: {e}")
+			print("Make sure the CSV has a 'filename' column")
+			sys.exit(1)
 
 	# Filter out already completed files
 	with open('./intermediate/ocr/complete_files_ocr.log', 'r') as f:

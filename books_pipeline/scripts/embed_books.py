@@ -374,6 +374,8 @@ def update_csv_with_embeddings(book_embed_dicts):
         possible_names = [
             f"{filename}.json",
             filename.replace('.pdf', '.json'),
+            filename.replace('.PDF', '.json'),
+            filename.lower().replace('.pdf', '.json'),  # Case insensitive
             filename.replace('&', '_').replace("'", '_') + '.json' if not filename.endswith('.json') else filename
         ]
 
