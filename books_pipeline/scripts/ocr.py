@@ -15,7 +15,16 @@ import subprocess
 import pandas as pd
 import sys
 import json
+import psutil
+import gc
 
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    return psutil.Process().memory_info().rss / 1024 / 1024 / 1024
+
+def get_available_memory():
+    """Get available system memory in GB"""
+    return psutil.virtual_memory().available / 1024 / 1024 / 1024
 
 def denoise(image):
 	gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -34,54 +43,95 @@ def compress_pdf(source_file, dest_file):
             '-sOutputFile={}'.format(dest_file), source_file
         ])
 
+def process_single_page(args):
+    """Process a single page - for parallel processing"""
+    pdf_path, page_num, out_dir, filename = args
+
+    try:
+        # Convert only the specific page
+        pages = convert_from_path(pdf_path, first_page=page_num+1, last_page=page_num+1)
+        if not pages:
+            return None
+
+        page = pages[0]
+
+        # Convert to numpy array and process
+        page_array = np.array(page.convert('RGB'))
+        page_array = denoise(page_array)
+        page_array = sharpen(page_array)
+
+        # Extract text
+        txt_content = pytesseract.image_to_string(page_array, lang='eng', config='--psm 6')
+
+        # Save text
+        page_out_path = os.path.join(out_dir, "txts", filename, f'page_{page_num}.txt')
+        with open(page_out_path, 'w', encoding='utf-8') as f:
+            f.write(txt_content)
+
+        # Clean up
+        del pages
+        del page_array
+        gc.collect()
+
+        return page_num
+
+    except Exception as e:
+        print(f"Error processing page {page_num} of {filename}: {e}")
+        return None
+
 def process_pdf_file(args):
-	try:
-		out, file = args
-		this_lang = 'eng'
+    try:
+        out, file = args
+        filename = os.path.splitext(os.path.basename(file))[0]
 
-		print(file)
-		timing_info = {"cv": 0, "tesseract": 0, "compression": 0}
-		t0 = time.time()
+        print(f"\nProcessing: {filename}")
+        print(f"Current memory usage: {get_memory_usage():.2f} GB")
+        print(f"Available memory: {get_available_memory():.2f} GB")
 
-		pages = convert_from_path(file)  # PDF to PIL images
-		pages = [np.array(page.convert('RGB')) for page in pages]  # PIL to numpy => BGR to RGB
-		pages = [denoise(page) for page in pages]  # Denoise
-		pages = [sharpen(page) for page in pages]  # Sharpen
+        # Create output directory
+        if not os.path.exists(os.path.join(out, 'txts', filename)):
+            os.makedirs(os.path.join(out, 'txts', filename))
 
-		timing_info["cv"] = time.time()
+        # Get page count without loading all pages
+        from PyPDF2 import PdfReader
+        reader = PdfReader(file)
+        num_pages = len(reader.pages)
+        print(f"Total pages: {num_pages}")
 
-		# Get filename for outputs
-		filename = os.path.splitext(os.path.basename(file))[0]
+        # Determine number of workers based on available memory
+        # Assume each page process uses ~0.5GB
+        available_mem = get_available_memory()
+        max_workers = min(4, int(available_mem / 0.5))  # Cap at 4 workers
+        max_workers = max(1, max_workers)  # At least 1 worker
 
-		# Create output directory for text files
-		if not os.path.exists(os.path.join(out, 'txts', filename)):
-			os.makedirs(os.path.join(out,'txts', filename))
+        print(f"Using {max_workers} workers for page processing")
 
-		# Text extraction only
-		for i, page in enumerate(pages):
-			try:
-				txt_content = pytesseract.image_to_string(page, lang=this_lang, config='--psm 6')
-			except Exception as e:
-				txt_content = ""
-				print(f"\n\nTesseract img2str failed on PAGE {i} of {file}: {e}")
+        # Process pages in parallel
+        page_args = [(file, i, out, filename) for i in range(num_pages)]
 
-			# Save individual text file
-			with open(os.path.join(out, "txts", filename, f'page_{i}.txt'), 'w', encoding='utf-8') as f:
-				f.write(txt_content)
+        successful_pages = 0
+        with Pool(processes=max_workers) as page_pool:
+            for result in tqdm(page_pool.imap_unordered(process_single_page, page_args),
+                             total=num_pages, desc=f"Pages in {filename}"):
+                if result is not None:
+                    successful_pages += 1
 
-		del pages
-		timing_info["tesseract"] = time.time()
+                # Monitor memory periodically
+                if successful_pages % 50 == 0:
+                    current_mem = get_memory_usage()
+                    if current_mem > 8.0:  # If using more than 8GB
+                        print(f"\nWarning: High memory usage ({current_mem:.2f} GB)")
 
-		print(f"Completed: {filename} ({i+1} pages)")
-		return file
+        print(f"Completed: {filename} ({successful_pages}/{num_pages} pages)")
+        return file if successful_pages > 0 else None
 
-	except Exception as e:
-		print(f"Error processing {file}: {e}")
-		return None
+    except Exception as e:
+        print(f"Error processing {file}: {e}")
+        return None
 
 
 if __name__ == "__main__":
-	cores = os.cpu_count() // 2
+	cores = 1  # Process one document at a time, parallelize pages
 
 	out = "./intermediate/ocr/"
 
@@ -193,6 +243,10 @@ if __name__ == "__main__":
 		sys.exit(1)
 
 	print(f"Using {cores} CPU cores")
+	print(f"Using {cores} document(s) at a time")
+	print(f"Initial memory usage: {get_memory_usage():.2f} GB")
+	print(f"Available memory: {get_available_memory():.2f} GB")
+	print("\nTIP: Use 'htop' or 'top' in another terminal to monitor system resources\n")
 
 	start_time = time.time()
 	successful = 0
@@ -210,6 +264,12 @@ if __name__ == "__main__":
 						f.write(file + '\n')
 				else:
 					failed += 1
+
+				gc.collect()
+
+				# Print memory status every 5 documents
+				if successful % 5 == 0:
+						print(f"\nMemory check - Usage: {get_memory_usage():.2f} GB, Available: {get_available_memory():.2f} GB")
 
 	total_time = time.time() - start_time
 
