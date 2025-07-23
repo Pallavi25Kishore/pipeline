@@ -9,6 +9,8 @@ import time
 from itertools import permutations
 from numpy import nan
 from datetime import datetime
+import shutil
+import gc
 
 # Import NLTK components if available
 try:
@@ -638,55 +640,100 @@ def process_book_texts(args):
 
         print(f"Processing: {book_name}")
 
+        # Create temp directory for this book
+        temp_dir = os.path.join("intermediate/cleaned/temp", book_name)
+        os.makedirs(temp_dir, exist_ok=True)
+
         book_txt_dir = os.path.join(input_dir, book_name)
         if not os.path.exists(book_txt_dir):
             print(f"Directory not found: {book_txt_dir}")
+            shutil.rmtree(temp_dir)  # Clean up
             return None
 
         # Get all page text files
         page_files = [f for f in os.listdir(book_txt_dir) if f.startswith('page_') and f.endswith('.txt')]
-        page_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))  # Sort by page number
+        page_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
 
         if not page_files:
             print(f"No page files found in {book_txt_dir}")
+            shutil.rmtree(temp_dir)  # Clean up
             return None
 
-        # Process each page
-        book_data = {}
+        # Process each page to temp files
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for page_file in page_files:
-            page_path = os.path.join(book_txt_dir, page_file)
-            page_num = int(page_file.split('_')[1].split('.')[0])
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            page_args = []
+            for page_file in page_files:
+                page_path = os.path.join(book_txt_dir, page_file)
+                page_num = int(page_file.split('_')[1].split('.')[0])
+                page_args.append((page_path, page_num, temp_dir))
 
-            try:
-                with open(page_path, 'r', encoding='utf-8') as f:
-                    page_text = f.read()
+            # Submit all pages
+            futures = [executor.submit(clean_and_save_page_temp, args) for args in page_args]
 
-                # Clean the page text using COMPLETE clean_txt.py implementation
-                cleaned_data = call_all(page_text)
-                book_data[page_num] = cleaned_data
+            # Track progress
+            successful = 0
+            for future in tqdm(as_completed(futures), total=len(futures),
+                             desc=f"Cleaning pages of {book_name}"):
+                if future.result():
+                    successful += 1
 
-            except Exception as e:
-                print(f"  ⚠️  Error processing {page_file}: {e}")
-                book_data[page_num] = {
-                    'pure_ocr_doc': '',
-                    'lazy_clean_doc': '',
-                    'legacy_clean_doc': ''
-                }
+        print(f"Cleaned {successful}/{len(page_files)} pages")
 
-        # Save cleaned book JSON
-        os.makedirs(output_dir, exist_ok=True)
+        # Merge temp files into final output
         output_file = os.path.join(output_dir, f'{book_name}.json')
+        print(f"Merging into final JSON...")
+        merge_temp_pages_to_final(temp_dir, output_file)
 
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(book_data, f, ensure_ascii=False, indent=2)
+        # Clean up temp directory
+        shutil.rmtree(temp_dir)
 
-        print(f"Completed: {book_name} ({len(book_data)} pages)")
+        print(f"Completed: {book_name}")
         return book_name
 
     except Exception as e:
         print(f"Error processing {book_name}: {e}")
+        # Clean up temp directory if it exists
+        if 'temp_dir' in locals() and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         return None
+
+def clean_and_save_page_temp(args):
+    """Clean a single page and save to temp directory"""
+    page_path, page_num, temp_dir = args
+    try:
+        with open(page_path, 'r', encoding='utf-8') as f:
+            page_text = f.read()
+
+        cleaned_data = call_all(page_text)
+
+        # Save to temp file
+        temp_file = os.path.join(temp_dir, f"page_{page_num:05d}.json")
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(cleaned_data, f)
+
+        return True
+    except Exception as e:
+        print(f"Error cleaning page {page_num}: {e}")
+        return False
+
+def merge_temp_pages_to_final(temp_dir, output_file):
+    """Merge temp files into final book JSON"""
+    book_data = {}
+
+    temp_files = sorted([f for f in os.listdir(temp_dir) if f.endswith('.json')])
+
+    for temp_file in temp_files:
+        page_num = int(temp_file.split('_')[1].split('.')[0])
+
+        with open(os.path.join(temp_dir, temp_file), 'r') as f:
+            page_data = json.load(f)
+
+        book_data[str(page_num)] = page_data
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(book_data, f, ensure_ascii=False, indent=2)
 
 def main():
     """Main text cleaning function"""
@@ -696,6 +743,8 @@ def main():
     # Setup paths
     input_dir = "intermediate/ocr/txts"
     output_dir = "intermediate/cleaned/jsons"
+    temp_base_dir = "intermediate/cleaned/temp"
+    os.makedirs(temp_base_dir, exist_ok=True)
 
     # Check input directory
     if not os.path.exists(input_dir):
@@ -739,17 +788,20 @@ def main():
     successful = 0
     failed = 0
 
-    with Pool(processes=cores) as pool:
-        args = [(input_dir, output_dir, book_name) for book_name in book_dirs]
+    # Process books sequentially for memory efficiency
+    for book_name in tqdm(book_dirs, desc="Cleaning books"):
+        result = process_book_texts((input_dir, output_dir, book_name))
+        if result is not None:
+            successful += 1
+        else:
+            failed += 1
 
-        results = []
-        for result in tqdm(pool.imap_unordered(process_book_texts, args),
-                         total=len(book_dirs), desc="Cleaning texts"):
-            results.append(result)
-            if result is not None:
-                successful += 1
-            else:
-                failed += 1
+        # Force garbage collection after each book
+        gc.collect()
+
+        #Memory status
+        if successful % 5 == 0 and successful > 0:
+            print(f"\nProcessed {successful} books successfully")
 
     # Summary
     total_time = time.time() - start_time
