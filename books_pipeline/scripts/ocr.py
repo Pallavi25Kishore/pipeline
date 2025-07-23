@@ -17,6 +17,7 @@ import sys
 import json
 import psutil
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def get_memory_usage():
     """Get current memory usage in GB"""
@@ -92,35 +93,44 @@ def process_pdf_file(args):
         if not os.path.exists(os.path.join(out, 'txts', filename)):
             os.makedirs(os.path.join(out, 'txts', filename))
 
-        # Get page count without loading all pages
+        # Get page count
         from PyPDF2 import PdfReader
         reader = PdfReader(file)
         num_pages = len(reader.pages)
         print(f"Total pages: {num_pages}")
 
-        # Determine number of workers based on available memory
-        # Assume each page process uses ~0.5GB
+        # Determine workers
         available_mem = get_available_memory()
-        max_workers = min(4, int(available_mem / 0.5))  # Cap at 4 workers
-        max_workers = max(1, max_workers)  # At least 1 worker
-
+        max_workers = min(4, int(available_mem / 0.5))
+        max_workers = max(1, max_workers)
         print(f"Using {max_workers} workers for page processing")
 
-        # Process pages in parallel
-        page_args = [(file, i, out, filename) for i in range(num_pages)]
-
+        # Process pages with threads
         successful_pages = 0
-        with Pool(processes=max_workers) as page_pool:
-            for result in tqdm(page_pool.imap_unordered(process_single_page, page_args),
-                             total=num_pages, desc=f"Pages in {filename}"):
-                if result is not None:
-                    successful_pages += 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all page processing tasks
+            future_to_page = {
+                executor.submit(process_single_page, (file, i, out, filename)): i
+                for i in range(num_pages)
+            }
 
-                # Monitor memory periodically
-                if successful_pages % 50 == 0:
-                    current_mem = get_memory_usage()
-                    if current_mem > 8.0:  # If using more than 8GB
-                        print(f"\nWarning: High memory usage ({current_mem:.2f} GB)")
+
+            with tqdm(total=num_pages, desc=f"Pages in {filename}") as pbar:
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            successful_pages += 1
+                    except Exception as e:
+                        print(f"Error on page {page_num}: {e}")
+                    pbar.update(1)
+
+                    # Monitor memory periodically
+                    if successful_pages % 50 == 0 and successful_pages > 0:
+                        current_mem = get_memory_usage()
+                        if current_mem > 8.0:
+                            print(f"\nWarning: High memory usage ({current_mem:.2f} GB)")
 
         print(f"Completed: {filename} ({successful_pages}/{num_pages} pages)")
         return file if successful_pages > 0 else None
@@ -131,7 +141,7 @@ def process_pdf_file(args):
 
 
 if __name__ == "__main__":
-	cores = 1  # Process one document at a time, parallelize pages
+	cores = 1
 
 	out = "./intermediate/ocr/"
 
@@ -252,24 +262,20 @@ if __name__ == "__main__":
 	successful = 0
 	failed = 0
 
-	with Manager() as manager:
-		counter = manager.Value('i', 0)
-		with Pool(processes=cores) as pool:
-			for file in tqdm(pool.imap_unordered(process_pdf_file, [(out, file) for file in files]), total=len(files)):
-				counter.value += 1
-				# Log the complete file path sequentially
-				if file is not None:
+	for file in tqdm(files):
+			result = process_pdf_file((out, file))
+			if result is not None:
 					successful += 1
 					with open('./intermediate/ocr/complete_files_ocr.log', 'a') as f:
-						f.write(file + '\n')
-				else:
+							f.write(result + '\n')
+			else:
 					failed += 1
 
-				gc.collect()
+			gc.collect()
 
-				# Print memory status every 5 documents
-				if successful % 5 == 0:
-						print(f"\nMemory check - Usage: {get_memory_usage():.2f} GB, Available: {get_available_memory():.2f} GB")
+			# Print memory status every 5 documents
+			if successful % 5 == 0 and successful > 0:
+					print(f"\nMemory check - Usage: {get_memory_usage():.2f} GB, Available: {get_available_memory():.2f} GB")
 
 	total_time = time.time() - start_time
 
