@@ -1,4 +1,3 @@
-
 import os
 import json
 import re
@@ -9,31 +8,36 @@ import time
 from itertools import permutations
 from numpy import nan
 from datetime import datetime
-import shutil
+import psutil
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import NLTK components if available
+NLTK_AVAILABLE = False
 try:
     import nltk
-    nltk.download('wordnet', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('omw-1.4', quiet=True)
-    from nltk.corpus import wordnet
-    from nltk.stem import WordNetLemmatizer
-    from nltk.corpus import stopwords
-    from english_words import get_english_words_set
+    try:
+        # Test if NLTK data is properly initialized
+        from nltk.corpus import wordnet
+        from nltk.stem import WordNetLemmatizer
+        from nltk.corpus import stopwords
+        from english_words import get_english_words_set
 
-    lower_words_set = get_english_words_set(['web2','gcide'], lower=True)
-    stop_words = set(stopwords.words('english'))
-    lemmatizer = WordNetLemmatizer()
+        # Test initialization
+        lemmatizer = WordNetLemmatizer()
+        test_word = lemmatizer.lemmatize("testing")
 
-    NLTK_AVAILABLE = True
-
+        # If we get here, NLTK is working
+        lower_words_set = get_english_words_set(['web2','gcide'], lower=True)
+        stop_words = set(stopwords.words('english'))
+        NLTK_AVAILABLE = True
+        print("✓ NLTK initialized successfully")
+    except Exception as e:
+        print(f"⚠️  NLTK initialization failed: {e}")
+        print("⚠️  Continuing without NLTK features")
+        NLTK_AVAILABLE = False
 except ImportError:
-    print("NLTK not available - some advanced cleaning features disabled")
-    NLTK_AVAILABLE = False
-except Exception as e:
-    print(f"NLTK initialization failed: {e}")
+    print("⚠️  NLTK not installed - some advanced cleaning features disabled")
     NLTK_AVAILABLE = False
 
 def replace_html_parsing_escape_chars(text):
@@ -134,12 +138,16 @@ def replace_blockquote(match):
             indented_lines.append(f'\t\t{firstline_indent}{line}')
     return '\n\n[BEGIN BLOCKQUOTE]\n\n' + '\n\n'.join(indented_lines) + '\n\n[END BLOCKQUOTE]\n\n'
 
+
 def is_english_word(word):
     """Check if word is English using NLTK"""
     if not NLTK_AVAILABLE:
-        return True  # Skip check if NLTK not available
-    lemmatized_word = lemmatizer.lemmatize(word.lower())
-    return wordnet.synsets(lemmatized_word) or word in stop_words or word in lower_words_set
+        return True
+    try:
+        lemmatized_word = lemmatizer.lemmatize(word.lower())
+        return wordnet.synsets(lemmatized_word) or word in stop_words or word in lower_words_set
+    except Exception:
+        return True
 
 def replace_broken_lowercase_words(match, s2_dash=False):
     """Replace broken lowercase words across line breaks"""
@@ -636,129 +644,111 @@ def call_all(doc):
 
     return res
 
-def process_book_texts(args):
-    """Process all text files for a single book"""
-    temp_dir = None
-    try:
-        input_dir, output_dir, book_name = args
+def process_single_page_text(args):
+    """Process a single page text - for parallel processing"""
+    page_path, page_num = args
 
-        print(f"Processing: {book_name}")
-
-        # Create temp directory for this book
-        temp_dir = os.path.join("intermediate/cleaned/temp", book_name)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        book_txt_dir = os.path.join(input_dir, book_name)
-        if not os.path.exists(book_txt_dir):
-            print(f"Directory not found: {book_txt_dir}")
-            shutil.rmtree(temp_dir)  # Clean up
-            return None
-
-        # Get all page text files
-        page_files = [f for f in os.listdir(book_txt_dir) if f.startswith('page_') and f.endswith('.txt')]
-        page_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-
-        if not page_files:
-            print(f"No page files found in {book_txt_dir}")
-            shutil.rmtree(temp_dir)  # Clean up
-            return None
-
-        # Process each page to temp files
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            page_args = []
-            for page_file in page_files:
-                page_path = os.path.join(book_txt_dir, page_file)
-                page_num = int(page_file.split('_')[1].split('.')[0])
-                page_args.append((page_path, page_num, temp_dir))
-
-            # Submit all pages
-            futures = [executor.submit(clean_and_save_page_temp, args) for args in page_args]
-
-            # Track progress
-            successful = 0
-            for future in tqdm(as_completed(futures), total=len(futures),
-                             desc=f"Cleaning pages of {book_name}"):
-                if future.result():
-                    successful += 1
-
-        print(f"Cleaned {successful}/{len(page_files)} pages")
-
-        # Merge temp files into final output
-        output_file = os.path.join(output_dir, f'{book_name}.json')
-        print(f"Merging into final JSON...")
-        merge_temp_pages_to_final(temp_dir, output_file)
-
-        # Clean up temp directory
-        shutil.rmtree(temp_dir)
-
-        print(f"Completed: {book_name}")
-        return book_name
-
-    except KeyboardInterrupt:
-        # INTERRUPT: Keep temp files so user can resume
-        print(f"\n⚠️  Interrupted while processing {book_name}")
-        print(f"   Temp files preserved in: {temp_dir}")
-        print(f"   You can manually merge later or delete and restart")
-        raise
-
-    except Exception as e:
-        print(f"Error processing {book_name}: {e}")
-        if temp_dir and os.path.exists(temp_dir):
-            print(f"   Temp files preserved in: {temp_dir}")
-            print(f"   Check for partial results or delete to retry")
-        return None
-
-def clean_and_save_page_temp(args):
-    """Clean a single page and save to temp directory"""
-    page_path, page_num, temp_dir = args
     try:
         with open(page_path, 'r', encoding='utf-8') as f:
             page_text = f.read()
 
+        # Clean the page text
         cleaned_data = call_all(page_text)
 
-        # Save to temp file
-        temp_file = os.path.join(temp_dir, f"page_{page_num:05d}.json")
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(cleaned_data, f)
+        return page_num, cleaned_data
 
-        return True
     except Exception as e:
-        print(f"Error cleaning page {page_num}: {e}")
-        return False
+        print(f"  ⚠️  Error processing page {page_num}: {e}")
+        return page_num, {
+            'pure_ocr_doc': '',
+            'lazy_clean_doc': '',
+            'legacy_clean_doc': ''
+        }
 
-def merge_temp_pages_to_final(temp_dir, output_file):
-    """Merge temp files into final book JSON"""
-    book_data = {}
+def process_book_texts_sequential(input_dir, output_dir, book_name):
+    """Process all text files for a single book using ThreadPoolExecutor for pages"""
+    try:
+        print(f"\nProcessing: {book_name}")
+        print(f"Current memory usage: {psutil.Process().memory_info().rss / 1024 / 1024 / 1024:.2f} GB")
 
-    temp_files = sorted([f for f in os.listdir(temp_dir) if f.endswith('.json')])
+        book_txt_dir = os.path.join(input_dir, book_name)
+        if not os.path.exists(book_txt_dir):
+            print(f"Directory not found: {book_txt_dir}")
+            return None
 
-    for temp_file in temp_files:
-        page_num = int(temp_file.split('_')[1].split('.')[0])
+        # Get all page text files
+        page_files = [f for f in os.listdir(book_txt_dir) if f.startswith('page_') and f.endswith('.txt')]
+        if not page_files:
+            print(f"No page files found in {book_txt_dir}")
+            return None
 
-        with open(os.path.join(temp_dir, temp_file), 'r') as f:
-            page_data = json.load(f)
+        # Sort by page number
+        page_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
 
-        book_data[str(page_num)] = page_data
+        # Prepare args for parallel processing
+        page_args = []
+        for page_file in page_files:
+            page_path = os.path.join(book_txt_dir, page_file)
+            page_num = int(page_file.split('_')[1].split('.')[0])
+            page_args.append((page_path, page_num))
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(book_data, f, ensure_ascii=False, indent=2)
+        # Process pages in parallel with ThreadPoolExecutor
+        book_data = {}
+        successful_pages = 0
+
+        # Determine number of workers based on available memory
+        available_mem = psutil.virtual_memory().available / 1024 / 1024 / 1024
+        max_workers = min(4, int(available_mem / 0.5))
+        max_workers = max(1, max_workers)
+        print(f"Using {max_workers} workers for page processing")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all page processing tasks
+            future_to_page = {
+                executor.submit(process_single_page_text, args): args[1]
+                for args in page_args
+            }
+
+            with tqdm(total=len(page_args), desc=f"Pages in {book_name}") as pbar:
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        result_page_num, cleaned_data = future.result()
+                        book_data[result_page_num] = cleaned_data
+                        successful_pages += 1
+                    except Exception as e:
+                        print(f"Error on page {page_num}: {e}")
+                    pbar.update(1)
+
+                    # Monitor memory periodically
+                    if successful_pages % 50 == 0 and successful_pages > 0:
+                        current_mem = psutil.Process().memory_info().rss / 1024 / 1024 / 1024
+                        if current_mem > 8.0:
+                            print(f"\nWarning: High memory usage ({current_mem:.2f} GB)")
+
+        # Save cleaned book JSON
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f'{book_name}.json')
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(book_data, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+        print(f"Completed: {book_name} ({successful_pages}/{len(page_args)} pages)")
+        gc.collect()
+
+        return book_name
+
+    except Exception as e:
+        print(f"Error processing {book_name}: {e}")
+        return None
 
 def main():
-    """Main function - processes books sequentially"""
-
-    print("Starting Text Cleaning for Books Pipeline")
+    """Main text cleaning function"""
+    print("Starting Text Cleaning for Legal Books Pipeline")
 
     # Setup paths
     input_dir = "intermediate/ocr/txts"
     output_dir = "intermediate/cleaned/jsons"
-    temp_base_dir = "intermediate/cleaned/temp"
-
-    # Create directories
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(temp_base_dir, exist_ok=True)
 
     # Check input directory
     if not os.path.exists(input_dir):
@@ -771,10 +761,14 @@ def main():
                  if os.path.isdir(os.path.join(input_dir, d))]
 
     if not book_dirs:
-        print(f"No book directories found in {input_dir}")
+        print(f" No book directories found in {input_dir}")
+        print(" Run OCR processing first: python scripts/01_ocr_books.py")
         return
 
     print(f"Found {len(book_dirs)} books to clean")
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
 
     # Check for already processed books
     if os.path.exists(output_dir):
@@ -788,34 +782,27 @@ def main():
         return
 
     print(f"Cleaning {len(book_dirs)} books...")
-    print("Processing books sequentially (1 at a time)")  # Make it clear
+    print(f"Initial memory usage: {psutil.Process().memory_info().rss / 1024 / 1024 / 1024:.2f} GB")
+    print(f"Available memory: {psutil.virtual_memory().available / 1024 / 1024 / 1024:.2f} GB")
+    print("\nTIP: Use 'htop' or 'top' in another terminal to monitor system resources\n")
 
+    # Process books sequentially
     start_time = time.time()
     successful = 0
     failed = 0
 
-    # SEQUENTIAL processing - one book at a time
-    try:
-        for book_name in tqdm(book_dirs, desc="Cleaning books"):
-            result = process_book_texts((input_dir, output_dir, book_name))
-            if result is not None:
-                successful += 1
-            else:
-                failed += 1
+    for book_name in tqdm(book_dirs, desc="Processing books"):
+        result = process_book_texts_sequential(input_dir, output_dir, book_name)
+        if result is not None:
+            successful += 1
+        else:
+            failed += 1
 
-            # Force garbage collection after each book
-            gc.collect()
+        gc.collect()
 
-            #Memory status every 5 books
-            if successful % 5 == 0 and successful > 0:
-                print(f"\nProcessed {successful} books successfully")
-
-    except KeyboardInterrupt:
-        print("\n\nProcess interrupted by user")
-        print(f"Successfully completed: {successful} books")
-        print(f"Failed: {failed} books")
-        print(f"Remaining: {len(book_dirs) - successful - failed} books")
-        return
+        # Print memory status every 5 books
+        if successful % 5 == 0 and successful > 0:
+            print(f"\nMemory check - Usage: {psutil.Process().memory_info().rss / 1024 / 1024 / 1024:.2f} GB")
 
     # Summary
     total_time = time.time() - start_time
