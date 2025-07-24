@@ -110,3 +110,5 @@ output/**/*
 !input/pdfs/sample.pdf
 
 .env
+**/migrations/*
+!**/migrations/__init__.py
