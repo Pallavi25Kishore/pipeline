@@ -25,10 +25,14 @@ class Books(models.Model):
     )
     importance = models.CharField(
         max_length=25500,
+        null=True,
+        blank=True,
         help_text="Importance level or rating"
     )
     topic = models.CharField(
         max_length=25500,
+        null=True,
+        blank=True,
         help_text="Book topic or subject"
     )
 
@@ -228,7 +232,6 @@ class Books(models.Model):
             models.Index(fields=['title']),
             models.Index(fields=['author']),
             models.Index(fields=['filename']),
-            models.Index(fields=['importance']),
             models.Index(fields=['topic']),
         ]
 
