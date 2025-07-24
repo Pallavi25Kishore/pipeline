@@ -129,7 +129,7 @@ def ensure_overlap(df, text_column, doc_id_column, para_id_column, max_len, over
 
     return df
 
-def process_cleaned_jsons(batch_size=1):
+def process_cleaned_jsons(batch_size=3):
     """
     Load cleaned JSON files and create DataFrame for chunking
     """
@@ -144,7 +144,6 @@ def process_cleaned_jsons(batch_size=1):
 
     completed_json_files = check_existing_embeddings()
     if completed_json_files:
-        print(f"Found {len(completed_json_files)} books with existing embeddings")
         json_files = [f for f in json_files if f not in completed_json_files]
         print(f"Will process {len(json_files)} new books")
 
@@ -235,11 +234,9 @@ def check_existing_embeddings():
             completed_json_files = set()
             for filename in completed_books:
                 possible_names = [
-                    f"{filename}.json",
                     filename.replace('.pdf', '.json'),
                     filename.replace('.PDF', '.json'),
-                    filename.lower().replace('.pdf', '.json'),
-                    filename.replace('&', '_').replace("'", '_') + '.json'
+                    filename.lower().replace('.pdf', '.json')
                 ]
                 completed_json_files.update(possible_names)
 
@@ -321,7 +318,11 @@ def create_embeddings(chunks_df):
 
     for i, row in tqdm(chunks_df.iterrows(), total=len(chunks_df), desc="Creating embeddings"):
         # Create chunk ID
-        page_nums_str = str(row['page_num']).replace(' ', '')
+        if isinstance(row['page_num'], list):
+            page_nums_str = ', '.join(map(str, row['page_num']))
+        else:
+            page_nums_str = str(row['page_num'])
+
         chunk_id = f"filename_{row['filename']}__page_[{page_nums_str}]__chunk_{row['chunk_id']}"
 
         # Get embedding
@@ -352,7 +353,10 @@ def create_embed_id_dict(chunks_df):
 
         for _, row in group.iterrows():
             # Create chunk ID
-            page_nums_str = str(row['page_num']).replace(' ', '').replace(',', ', ')
+            if isinstance(row['page_num'], list):
+                page_nums_str = ', '.join(map(str, row['page_num']))
+            else:
+                page_nums_str = str(row['page_num'])
             chunk_id = f"filename_{filename}__page_[{page_nums_str}]__chunk_{row['chunk_id']}"
 
             # Store text content
@@ -406,11 +410,9 @@ def update_csv_with_embeddings(book_embed_dicts):
 
         # Try different filename formats
         possible_names = [
-            f"{filename}.json",
             filename.replace('.pdf', '.json'),
             filename.replace('.PDF', '.json'),
-            filename.lower().replace('.pdf', '.json'),
-            filename.replace('&', '_').replace("'", '_') + '.json' if not filename.endswith('.json') else filename
+            filename.lower().replace('.pdf', '.json')
         ]
 
         for name in possible_names:
@@ -522,7 +524,7 @@ def main():
     import gc
 
     # Process in batches of 5 books
-    all_book_embed_dicts = process_cleaned_jsons(batch_size=5)
+    all_book_embed_dicts = process_cleaned_jsons(batch_size=3)
 
     if all_book_embed_dicts is None:
         return
