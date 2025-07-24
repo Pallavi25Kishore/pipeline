@@ -15,13 +15,25 @@ import gc
 # Import NLTK components if available
 try:
     import nltk
+    nltk.download('wordnet', quiet=True)
+    nltk.download('stopwords', quiet=True)
+    nltk.download('omw-1.4', quiet=True)
     from nltk.corpus import wordnet
     from nltk.stem import WordNetLemmatizer
     from nltk.corpus import stopwords
     from english_words import get_english_words_set
+
+    lower_words_set = get_english_words_set(['web2','gcide'], lower=True)
+    stop_words = set(stopwords.words('english'))
+    lemmatizer = WordNetLemmatizer()
+
     NLTK_AVAILABLE = True
+
 except ImportError:
-    print("⚠️  NLTK not available - some advanced cleaning features disabled")
+    print("NLTK not available - some advanced cleaning features disabled")
+    NLTK_AVAILABLE = False
+except Exception as e:
+    print(f"NLTK initialization failed: {e}")
     NLTK_AVAILABLE = False
 
 def replace_html_parsing_escape_chars(text):
@@ -121,15 +133,6 @@ def replace_blockquote(match):
         else:
             indented_lines.append(f'\t\t{firstline_indent}{line}')
     return '\n\n[BEGIN BLOCKQUOTE]\n\n' + '\n\n'.join(indented_lines) + '\n\n[END BLOCKQUOTE]\n\n'
-
-# Initialize NLTK components if available
-if NLTK_AVAILABLE:
-    try:
-        lower_words_set = get_english_words_set(['web2','gcide'], lower=True)
-        stop_words = set(stopwords.words('english'))
-        lemmatizer = WordNetLemmatizer()
-    except:
-        NLTK_AVAILABLE = False
 
 def is_english_word(word):
     """Check if word is English using NLTK"""
@@ -635,6 +638,7 @@ def call_all(doc):
 
 def process_book_texts(args):
     """Process all text files for a single book"""
+    temp_dir = None
     try:
         input_dir, output_dir, book_name = args
 
@@ -692,11 +696,18 @@ def process_book_texts(args):
         print(f"Completed: {book_name}")
         return book_name
 
+    except KeyboardInterrupt:
+        # INTERRUPT: Keep temp files so user can resume
+        print(f"\n⚠️  Interrupted while processing {book_name}")
+        print(f"   Temp files preserved in: {temp_dir}")
+        print(f"   You can manually merge later or delete and restart")
+        raise
+
     except Exception as e:
         print(f"Error processing {book_name}: {e}")
-        # Clean up temp directory if it exists
-        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        if temp_dir and os.path.exists(temp_dir):
+            print(f"   Temp files preserved in: {temp_dir}")
+            print(f"   Check for partial results or delete to retry")
         return None
 
 def clean_and_save_page_temp(args):
@@ -736,14 +747,17 @@ def merge_temp_pages_to_final(temp_dir, output_file):
         json.dump(book_data, f, ensure_ascii=False, indent=2)
 
 def main():
-    """Main text cleaning function"""
+    """Main function - processes books sequentially"""
 
-    print("Starting Text Cleaning for Legal Books Pipeline")
+    print("Starting Text Cleaning for Books Pipeline")
 
     # Setup paths
     input_dir = "intermediate/ocr/txts"
     output_dir = "intermediate/cleaned/jsons"
     temp_base_dir = "intermediate/cleaned/temp"
+
+    # Create directories
+    os.makedirs(output_dir, exist_ok=True)
     os.makedirs(temp_base_dir, exist_ok=True)
 
     # Check input directory
@@ -757,14 +771,10 @@ def main():
                  if os.path.isdir(os.path.join(input_dir, d))]
 
     if not book_dirs:
-        print(f" No book directories found in {input_dir}")
-        print(" Run OCR processing first: python scripts/01_ocr_books.py")
+        print(f"No book directories found in {input_dir}")
         return
 
     print(f"Found {len(book_dirs)} books to clean")
-
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
 
     # Check for already processed books
     if os.path.exists(output_dir):
@@ -778,30 +788,34 @@ def main():
         return
 
     print(f"Cleaning {len(book_dirs)} books...")
+    print("Processing books sequentially (1 at a time)")  # Make it clear
 
-    # Setup multiprocessing
-    cores = min(os.cpu_count() // 2, len(book_dirs))
-    print(f"Using {cores} CPU cores")
-
-    # Process books in parallel
     start_time = time.time()
     successful = 0
     failed = 0
 
-    # Process books sequentially for memory efficiency
-    for book_name in tqdm(book_dirs, desc="Cleaning books"):
-        result = process_book_texts((input_dir, output_dir, book_name))
-        if result is not None:
-            successful += 1
-        else:
-            failed += 1
+    # SEQUENTIAL processing - one book at a time
+    try:
+        for book_name in tqdm(book_dirs, desc="Cleaning books"):
+            result = process_book_texts((input_dir, output_dir, book_name))
+            if result is not None:
+                successful += 1
+            else:
+                failed += 1
 
-        # Force garbage collection after each book
-        gc.collect()
+            # Force garbage collection after each book
+            gc.collect()
 
-        #Memory status
-        if successful % 5 == 0 and successful > 0:
-            print(f"\nProcessed {successful} books successfully")
+            #Memory status every 5 books
+            if successful % 5 == 0 and successful > 0:
+                print(f"\nProcessed {successful} books successfully")
+
+    except KeyboardInterrupt:
+        print("\n\nProcess interrupted by user")
+        print(f"Successfully completed: {successful} books")
+        print(f"Failed: {failed} books")
+        print(f"Remaining: {len(book_dirs) - successful - failed} books")
+        return
 
     # Summary
     total_time = time.time() - start_time
