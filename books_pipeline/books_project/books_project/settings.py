@@ -146,8 +146,6 @@ LOGGING = {
 BOOKS_PIPELINE = {
     'BATCH_SIZE': 100,
     'CSV_SEARCH_PATHS': [
-        '../input/csv',
-        '../../input/csv',
-        'input/csv',
+        BASE_DIR.parent / 'input' / 'csv',  # This points to books_pipeline/input/csv
     ]
 }

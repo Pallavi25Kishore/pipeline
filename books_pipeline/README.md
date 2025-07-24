@@ -26,6 +26,7 @@ CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index
 3. **Add your files:**
 
    - Place CSV file in `input/csv/`
+   - in case of an xlsx file, place it in input/csv then run the command: python3 -c "import pandas as pd; pd.read_excel('input/csv/filename.xlsx').to_csv('input/csv/books.csv', index=False)"
    - Place PDF files in `input/pdfs/` (ensure filename in csv matches the pdf filename)
 
 4. **Set up database credentials:**

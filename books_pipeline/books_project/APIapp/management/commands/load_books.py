@@ -11,6 +11,22 @@ import ast
 import pandas as pd
 import sys
 from django.conf import settings
+from pathlib import Path
+
+# # First time - loads all books
+# python manage.py load_books
+
+# # Subsequent runs - only adds new books
+# python manage.py load_books
+
+# # Update existing books too
+# python manage.py load_books --update
+
+# # Preview what would happen
+# python manage.py load_books --dry-run
+
+# # Force reload everything
+# python manage.py load_books --force
 
 # Increase CSV field size limit
 csv.field_size_limit(sys.maxsize)
@@ -30,7 +46,7 @@ class Command(BaseCommand):
         parser.add_argument(
             '--batch-size',
             type=int,
-            default=getattr(settings, 'BOOKS_PIPELINE', {}).get('BATCH_SIZE', 100),
+            default=settings.BOOKS_PIPELINE.get('BATCH_SIZE', 100),
             help='Batch size for database operations (default: 100)'
         )
         parser.add_argument(
@@ -39,47 +55,50 @@ class Command(BaseCommand):
             help='Force reload even if data exists'
         )
         parser.add_argument(
+            '--update',
+            action='store_true',
+            help='Update existing books with new data'
+        )
+        parser.add_argument(
             '--dry-run',
             action='store_true',
             help='Test run without saving to database'
         )
 
     def find_latest_csv(self):
-        """Find the latest CSV file with embeddings"""
-        # Search paths from settings or default
-        search_paths = getattr(settings, 'BOOKS_PIPELINE', {}).get('CSV_SEARCH_PATHS', [
-            '../input/csv',
-            '../../input/csv',
-            'input/csv',
-            os.path.join(os.path.dirname(settings.BASE_DIR), 'input', 'csv')
-        ])
+        """Find the CSV file with embeddings, fallback to books.csv"""
+        # Get search paths from settings
+        search_paths = settings.BOOKS_PIPELINE.get('CSV_SEARCH_PATHS', [])
 
+        # Check each search path
         for csv_dir in search_paths:
-            if os.path.exists(csv_dir):
-                csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+            csv_dir = Path(csv_dir)  # Convert to Path object
 
-                if csv_files:
-                    # Prefer files with 'embeddings' in the name
-                    embedding_csvs = [f for f in csv_files if 'embedding' in f.lower()]
-
-                    if embedding_csvs:
-                        embedding_csvs.sort()
-                        latest_csv = embedding_csvs[-1]
-                    else:
-                        csv_files.sort()
-                        latest_csv = csv_files[-1]
-
-                    csv_path = os.path.join(csv_dir, latest_csv)
+            if csv_dir.exists():
+                # Check for books_with_embeddings.csv first
+                embeddings_file = csv_dir / 'books_with_embeddings.csv'
+                if embeddings_file.exists():
                     self.stdout.write(
-                        self.style.SUCCESS(f"Found CSV file: {csv_path}")
+                        self.style.SUCCESS(f"Found CSV file: {embeddings_file}")
                     )
-                    return csv_path
+                    return str(embeddings_file)
 
+                # Fallback to books.csv
+                books_file = csv_dir / 'books.csv'
+                if books_file.exists():
+                    self.stdout.write(
+                        self.style.SUCCESS(f"Found CSV file: {books_file} (fallback)")
+                    )
+                    return str(books_file)
+
+        # If no files found
         self.stdout.write(
-            self.style.ERROR("No CSV files found in search paths:")
+            self.style.ERROR("No CSV files found. Checked:")
         )
         for path in search_paths:
-            self.stdout.write(f"  - {path}")
+            self.stdout.write(f"  - {path}/books_with_embeddings.csv")
+            self.stdout.write(f"  - {path}/books.csv")
+
         return None
 
     def validate_and_clean_data(self, row):
@@ -199,6 +218,7 @@ class Command(BaseCommand):
         csv_file = kwargs.get('csv_file')
         batch_size = kwargs.get('batch_size')
         force = kwargs.get('force', False)
+        update = kwargs.get('update', False)
         dry_run = kwargs.get('dry_run', False)
 
         self.stdout.write(
@@ -215,15 +235,19 @@ class Command(BaseCommand):
         if not os.path.exists(csv_file):
             raise CommandError(f'CSV file not found: {csv_file}')
 
-        # Check if data already exists (unless force is used)
-        if not force and not dry_run:
+        # Show current database state
+        if not dry_run:
             existing_books = Books.objects.count()
             if existing_books > 0:
                 self.stdout.write(
-                    self.style.WARNING(f'Database already contains {existing_books} books.')
+                    self.style.SUCCESS(f'Database currently contains {existing_books} books.')
                 )
-                self.stdout.write('Use --force to reload data anyway.')
-                return
+                if force:
+                    self.stdout.write(
+                        self.style.WARNING('Force flag set - will reload all data.')
+                    )
+                else:
+                    self.stdout.write('Adding new books incrementally...')
 
         if dry_run:
             self.stdout.write(
@@ -233,9 +257,10 @@ class Command(BaseCommand):
         logger.info('Starting books data loading process')
         self.stdout.write(f'Loading books data from: {csv_file}')
 
-        books_list = []
         successful_count = 0
         error_count = 0
+        updated_count = 0
+        skipped_count = 0
 
         try:
             # Read CSV with pandas for better handling
@@ -262,7 +287,13 @@ class Command(BaseCommand):
                     self.style.WARNING("Warning: embed_id_dict column not found")
                 )
 
-            # Process each row with transaction
+            # Get existing filenames for incremental loading
+            existing_filenames = set()
+            if not force and not dry_run:
+                existing_filenames = set(Books.objects.values_list('filename', flat=True))
+                self.stdout.write(f'Found {len(existing_filenames)} existing books in database')
+
+            # Process each row
             self.stdout.write('Processing books...')
 
             with transaction.atomic():
@@ -270,21 +301,40 @@ class Command(BaseCommand):
                     try:
                         # Clean and validate data
                         cleaned_data = self.validate_and_clean_data(row.to_dict())
+                        filename = cleaned_data.get('filename')
 
-                        # Create Books instance
-                        book = Books(**cleaned_data)
-                        books_list.append(book)
+                        if not filename:
+                            logger.warning(f'Row {index} has no filename, skipping')
+                            continue
 
-                        # Batch insert
-                        if len(books_list) >= batch_size:
-                            if not dry_run:
-                                Books.objects.bulk_create(books_list, ignore_conflicts=True)
-                            successful_count += len(books_list)
-                            logger.info(f'Batch processed. Total: {successful_count}')
-                            self.stdout.write(
-                                f'Processed batch: {len(books_list)} books (Total: {successful_count})'
-                            )
-                            books_list = []  # reset the list for the next batch
+                        if dry_run:
+                            # Dry run - just count
+                            if filename in existing_filenames:
+                                if update:
+                                    updated_count += 1
+                                else:
+                                    skipped_count += 1
+                            else:
+                                successful_count += 1
+                        else:
+                            # Actual database operations
+                            if force:
+                                # Force mode - delete and recreate
+                                Books.objects.filter(filename=filename).delete()
+                                Books.objects.create(**cleaned_data)
+                                successful_count += 1
+                            elif filename in existing_filenames:
+                                if update:
+                                    # Update existing record
+                                    Books.objects.filter(filename=filename).update(**cleaned_data)
+                                    updated_count += 1
+                                else:
+                                    # Skip existing record
+                                    skipped_count += 1
+                            else:
+                                # Create new record
+                                Books.objects.create(**cleaned_data)
+                                successful_count += 1
 
                     except Exception as e:
                         error_count += 1
@@ -293,14 +343,6 @@ class Command(BaseCommand):
                             self.stdout.write(
                                 self.style.ERROR(f"Error processing row {index}: {e}")
                             )
-
-                # Insert remaining books
-                if books_list:
-                    if not dry_run:
-                        Books.objects.bulk_create(books_list, ignore_conflicts=True)
-                    successful_count += len(books_list)
-                    logger.info('Final batch processed.')
-                    self.stdout.write(f'Processed final batch: {len(books_list)} books')
 
         except Exception as e:
             self.stdout.write(
@@ -315,12 +357,19 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS('DRY RUN COMPLETE - No data was saved')
             )
+            self.stdout.write(f'Would add: {successful_count} new books')
+            self.stdout.write(f'Would update: {updated_count} existing books')
+            self.stdout.write(f'Would skip: {skipped_count} existing books')
         else:
             self.stdout.write(
                 self.style.SUCCESS('Database loading complete!')
             )
+            self.stdout.write(f'Added: {successful_count} new books')
+            if update:
+                self.stdout.write(f'Updated: {updated_count} existing books')
+            else:
+                self.stdout.write(f'Skipped: {skipped_count} existing books')
 
-        self.stdout.write(f'Successfully processed: {successful_count} books')
         if error_count > 0:
             self.stdout.write(
                 self.style.WARNING(f'Errors encountered: {error_count}')
