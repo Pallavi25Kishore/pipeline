@@ -18,6 +18,7 @@ import pickle
 import time
 from multiprocessing import Pool
 import sys
+import gc
 
 def split_text(df, text_column, doc_id_column, para_id_column, max_len=350, min_len=175, overlap=50):
     """
@@ -108,13 +109,14 @@ def ensure_overlap(df, text_column, doc_id_column, para_id_column, max_len, over
     df['length'] = df[text_column].apply(lambda x: len(x.split()))
 
     # Processing in reverse direction - remove small chunks
+    indices_to_drop = []
     for i in tqdm(reversed(df.index), desc="Removing small chunks"):
         if (df.loc[i, 'length'] < overlap and i > 0 and
             df.loc[i, doc_id_column] == df.loc[i-1, doc_id_column] and
             df.loc[i, para_id_column][0] != 0):
             df.loc[i-1, para_id_column].extend(df.loc[i, para_id_column])
-            df.drop(i, inplace=True)
-
+            indices_to_drop.append(i)
+    df.drop(indices_to_drop, inplace=True)
     df.reset_index(drop=True, inplace=True)
     df['length'] = df[text_column].apply(lambda x: len(x.split()))
 
@@ -127,7 +129,7 @@ def ensure_overlap(df, text_column, doc_id_column, para_id_column, max_len, over
 
     return df
 
-def process_cleaned_jsons():
+def process_cleaned_jsons(batch_size=1):
     """
     Load cleaned JSON files and create DataFrame for chunking
     """
@@ -150,65 +152,77 @@ def process_cleaned_jsons():
         print("No new JSON files to process - all books already have embeddings!")
         return None
 
-    print(f"Loading {len(json_files)} cleaned JSON files...")
+    print(f"Loading {len(json_files)} cleaned JSON files in batches of {batch_size}...")
 
-    # Create DataFrame from JSON files
-    dfs = []
+    # Process in batches
+    all_book_embed_dicts = {}
 
-    for json_file in tqdm(json_files, desc="Loading JSON files"):
-        filepath = os.path.join(input_dir, json_file)
+    for batch_start in range(0, len(json_files), batch_size):
+        batch_end = min(batch_start + batch_size, len(json_files))
+        batch_files = json_files[batch_start:batch_end]
 
-        with open(filepath, 'r', encoding='utf-8') as f:
-            book_data = json.load(f)
+        print(f"\n{'='*60}")
+        print(f"Processing batch {batch_start//batch_size + 1}: Books {batch_start+1}-{batch_end} of {len(json_files)}")
+        print(f"{'='*60}")
 
-        # Convert to DataFrame format
-        pages = []
-        page_nums = []
-        filenames = []
+        # Create DataFrame from this batch
+        dfs = []
 
-        for page_num, page_content in book_data.items():
-            # Use legacy_clean_doc as the main text
-            text = page_content.get('legacy_clean_doc', '')
-            pages.append(text)
-            page_nums.append(int(page_num))
-            filenames.append(json_file)
+        for json_file in tqdm(batch_files, desc=f"Loading batch {batch_start//batch_size + 1}"):
+            filepath = os.path.join(input_dir, json_file)
 
-        book_df = pd.DataFrame({
-            'text': pages,
-            'page_num': page_nums,
-            'filename': filenames
-        })
+            with open(filepath, 'r', encoding='utf-8') as f:
+                book_data = json.load(f)
 
-        dfs.append(book_df)
+            # Convert to DataFrame format
+            pages = []
+            page_nums = []
+            filenames = []
 
-    # Combine all books
-    combined_df = pd.concat(dfs, ignore_index=True)
-    print(f"Loaded {len(combined_df)} pages from {len(json_files)} books")
+            for page_num, page_content in book_data.items():
+                text = page_content.get('legacy_clean_doc', '')
+                pages.append(text)
+                page_nums.append(int(page_num))
+                filenames.append(json_file)
 
-    return combined_df
+            book_df = pd.DataFrame({
+                'text': pages,
+                'page_num': page_nums,
+                'filename': filenames
+            })
+
+            dfs.append(book_df)
+
+        # Combine this batch
+        batch_df = pd.concat(dfs, ignore_index=True)
+        print(f"Loaded {len(batch_df)} pages from {len(batch_files)} books in this batch")
+
+        # Process this batch through the pipeline
+        process_batch(batch_df, all_book_embed_dicts)
+
+        # Clear memory
+        del dfs, batch_df
+        gc.collect()
+
+        print(f"Batch {batch_start//batch_size + 1} complete. Memory freed.")
+
+    return all_book_embed_dicts
 
 def check_existing_embeddings():
     """
-    Check which books already have embeddings in the CSV
+    Check which books already have embeddings in books_with_embeddings.csv
     """
     csv_dir = "input/csv"
-    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
+    embeddings_csv = os.path.join(csv_dir, 'books_with_embeddings.csv')
 
-    if not csv_files:
+    # If embeddings CSV doesn't exist, no books have embeddings yet
+    if not os.path.exists(embeddings_csv):
+        print("No existing embeddings found (books_with_embeddings.csv doesn't exist)")
         return set()
 
-    # Find the most recent CSV (with or without embeddings)
-    csv_files.sort()
-    embedding_csvs = [f for f in csv_files if 'embedding' in f.lower()]
-    if embedding_csvs:
-        csv_file = embedding_csvs[-1]
-    else:
-        csv_file = csv_files[-1]
-
-    csv_path = os.path.join(csv_dir, csv_file)
-
     try:
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(embeddings_csv)
+
         # Check which books have non-empty embed_id_dict
         if 'embed_id_dict' in df.columns:
             completed_books = df[
@@ -223,13 +237,16 @@ def check_existing_embeddings():
                 possible_names = [
                     f"{filename}.json",
                     filename.replace('.pdf', '.json'),
+                    filename.replace('.PDF', '.json'),
+                    filename.lower().replace('.pdf', '.json'),
                     filename.replace('&', '_').replace("'", '_') + '.json'
                 ]
                 completed_json_files.update(possible_names)
 
+            print(f"Found {len(completed_books)} books with existing embeddings in books_with_embeddings.csv")
             return completed_json_files
     except Exception as e:
-        print(f"Could not read CSV: {e}")
+        print(f"Could not read embeddings CSV: {e}")
 
     return set()
 
@@ -347,27 +364,44 @@ def create_embed_id_dict(chunks_df):
 
 def update_csv_with_embeddings(book_embed_dicts):
     """
-    Update the original CSV with embed_id_dict and embed_filename
+    Update the CSV with embed_id_dict and embed_filename
+    Always reads from books.csv and writes to books_with_embeddings.csv
     """
     print("Updating CSV with embedding data...")
 
-    # Find CSV file
     csv_dir = "input/csv"
-    csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
 
-    if not csv_files:
-        print(f"No CSV files found in {csv_dir}")
-        return
+    # Always read from the original books.csv
+    original_csv = os.path.join(csv_dir, 'books.csv')
+    embeddings_csv = os.path.join(csv_dir, 'books_with_embeddings.csv')
 
-    # Use the first CSV file (or you can specify which one)
-    csv_file = csv_files[0]
-    csv_path = os.path.join(csv_dir, csv_file)
+    if not os.path.exists(original_csv):
+        print(f"Error: {original_csv} not found!")
+        return None
 
-    print(f"Reading CSV: {csv_file}")
-    df = pd.read_csv(csv_path)
+    # Check if embeddings CSV already exists
+    if os.path.exists(embeddings_csv):
+        print(f"Found existing {embeddings_csv}, will update it")
+        df = pd.read_csv(embeddings_csv)
+    else:
+        print(f"Creating new embeddings CSV from {original_csv}")
+        df = pd.read_csv(original_csv)
+        # Initialize embedding columns if they don't exist
+        if 'embed_id_dict' not in df.columns:
+            df['embed_id_dict'] = ''
+        if 'embed_filename' not in df.columns:
+            df['embed_filename'] = ''
 
-    # Update CSV with embedding data
-    def update_embed_data(row):
+    # Update only rows that don't have embeddings yet
+    updated_count = 0
+
+    for idx, row in df.iterrows():
+        # Skip if already has embeddings
+        if (pd.notna(row.get('embed_id_dict')) and
+            row.get('embed_id_dict') != '' and
+            row.get('embed_id_dict') != '{}'):
+            continue
+
         filename = str(row['filename'])
 
         # Try different filename formats
@@ -375,88 +409,79 @@ def update_csv_with_embeddings(book_embed_dicts):
             f"{filename}.json",
             filename.replace('.pdf', '.json'),
             filename.replace('.PDF', '.json'),
-            filename.lower().replace('.pdf', '.json'),  # Case insensitive
+            filename.lower().replace('.pdf', '.json'),
             filename.replace('&', '_').replace("'", '_') + '.json' if not filename.endswith('.json') else filename
         ]
 
         for name in possible_names:
             if name in book_embed_dicts:
-                return book_embed_dicts[name], name
+                df.at[idx, 'embed_id_dict'] = book_embed_dicts[name]
+                df.at[idx, 'embed_filename'] = name
+                updated_count += 1
+                break
 
-        return {}, ''
+    # Always save to books_with_embeddings.csv
+    df.to_csv(embeddings_csv, index=False)
 
-    # Only update rows that don't have embeddings yet
-    def update_row_if_needed(row):
-        # Skip if already has embeddings
-        if (pd.notna(row.get('embed_id_dict')) and
-            row.get('embed_id_dict') != '' and
-            row.get('embed_id_dict') != '{}'):
-            return row['embed_id_dict'], row.get('embed_filename', '')
-
-        # Update if no embeddings
-        return update_embed_data(row)
-
-    tqdm.pandas(desc="Updating new CSV rows")
-    embed_data = df.progress_apply(update_row_if_needed, axis=1)
-
-    df['embed_id_dict'] = [data[0] for data in embed_data]
-    df['embed_filename'] = [data[1] for data in embed_data]
-
-    # Save updated CSV
-    output_csv = os.path.join(csv_dir, csv_file.replace('.csv', '_with_embeddings.csv'))
-    df.to_csv(output_csv, index=False)
-
-    print(f"Updated CSV saved: {output_csv}")
+    print(f"Updated {updated_count} new books with embeddings")
+    print(f"Saved to: {embeddings_csv}")
 
     # Print summary
-    books_with_embeddings = sum(1 for d in df['embed_id_dict'] if d != {})
-    print(f"Summary: {books_with_embeddings}/{len(df)} books have embeddings")
+    books_with_embeddings = sum(1 for d in df['embed_id_dict']
+                               if pd.notna(d) and d != '' and d != '{}')
+    print(f"Total: {books_with_embeddings}/{len(df)} books now have embeddings")
 
-    return output_csv
+    return embeddings_csv
 
-def save_embeddings(embeddings_list, chunk_ids):
+def save_embeddings_batch(embeddings_list, chunk_ids):
     """
-    Save embeddings and IDs for FAISS index creation
+    Save embeddings in append mode for batch processing
     """
-    print("Saving embeddings...")
+    print("Saving batch embeddings...")
 
-    # Create output directory
     output_dir = "intermediate/embeddings/bodies"
     os.makedirs(output_dir, exist_ok=True)
 
     # Convert embeddings to tensor
     embeddings_tensor = torch.cat(embeddings_list, dim=0)
 
-    # Save as pickle
+    # Load existing embeddings if they exist
+    output_file = os.path.join(output_dir, 'books_embeddings.pkl')
+
+    if os.path.exists(output_file):
+        print("Loading existing embeddings to append...")
+        with open(output_file, 'rb') as f:
+            existing_data = pickle.load(f)
+
+        # Append new data
+        combined_embeddings = torch.cat([existing_data['embeddings'], embeddings_tensor], dim=0)
+        combined_ids = existing_data['ids'] + chunk_ids
+    else:
+        combined_embeddings = embeddings_tensor
+        combined_ids = chunk_ids
+
+    # Save combined data
     embedding_data = {
-        'embeddings': embeddings_tensor,
-        'ids': chunk_ids
+        'embeddings': combined_embeddings,
+        'ids': combined_ids
     }
 
-    output_file = os.path.join(output_dir, 'books_embeddings.pkl')
     with open(output_file, 'wb') as f:
         pickle.dump(embedding_data, f)
 
-    print(f"Embeddings saved: {output_file}")
-    print(f"Shape: {embeddings_tensor.shape}")
-    print(f"Total chunks: {len(chunk_ids)}")
+    print(f"Batch saved. Total embeddings now: {combined_embeddings.shape}")
 
-def main():
+def process_batch(batch_df, all_book_embed_dicts):
     """
-    Main embedding pipeline function
+    Process a batch of books through chunking and embedding
     """
-    print("Starting Book Chunking and Embedding Pipeline")
+    # Step 1: Create chunks
+    print("Creating chunks for this batch...")
+    chunks_df = split_text(batch_df, text_column='text',
+                          doc_id_column='filename',
+                          para_id_column='page_num')
 
-    # Step 1: Load cleaned JSON files
-    df = process_cleaned_jsons()
-    if df is None:
-        return
-
-    # Step 2: Create chunks with page awareness
-    print("Creating chunks with page awareness...")
-    chunks_df = split_text(df, text_column='text', doc_id_column='filename', para_id_column='page_num')
-
-    # Step 3: Add chunk IDs
+    # Step 2: Add chunk IDs
     print("Adding chunk IDs...")
     chunks_df['chunk_id'] = 0
     chunks_df.reset_index(drop=True, inplace=True)
@@ -467,20 +492,43 @@ def main():
             chunks_df.loc[i, 'page_num'] == chunks_df.loc[i+1, 'page_num']):
             chunks_df.loc[i+1, 'chunk_id'] = chunks_df.loc[i, 'chunk_id'] + 1
 
-    print(f"Created {len(chunks_df)} chunks")
+    print(f"Created {len(chunks_df)} chunks in this batch")
     print(f"Average chunk length: {chunks_df['length'].mean():.1f} words")
 
-    # Step 4: Create embeddings
+    # Step 3: Create embeddings
     embeddings_list, chunk_ids = create_embeddings(chunks_df)
 
-    # Step 5: Save embeddings
-    save_embeddings(embeddings_list, chunk_ids)
+    # Step 4: Save embeddings (append mode)
+    save_embeddings_batch(embeddings_list, chunk_ids)
 
-    # Step 6: Create embed_id_dict for CSV
-    book_embed_dicts = create_embed_id_dict(chunks_df)
+    # Step 5: Create embed_id_dict for this batch
+    batch_embed_dicts = create_embed_id_dict(chunks_df)
 
-    # Step 7: Update CSV
-    updated_csv = update_csv_with_embeddings(book_embed_dicts)
+    # Add to overall dictionary
+    all_book_embed_dicts.update(batch_embed_dicts)
+
+    # Clear memory
+    del chunks_df, embeddings_list, chunk_ids
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    gc.collect()
+
+def main():
+    """
+    Main embedding pipeline function
+    """
+    print("Starting Book Chunking and Embedding Pipeline")
+
+    # Add garbage collection
+    import gc
+
+    # Process in batches of 5 books
+    all_book_embed_dicts = process_cleaned_jsons(batch_size=5)
+
+    if all_book_embed_dicts is None:
+        return
+
+    # Update CSV with all embed_id_dicts
+    updated_csv = update_csv_with_embeddings(all_book_embed_dicts)
 
     print(f"\nEmbedding Pipeline Complete!")
     print(f"Updated CSV: {updated_csv}")
