@@ -765,7 +765,7 @@ def main():
         print(" Run OCR processing first: python scripts/01_ocr_books.py")
         return
 
-    print(f"Found {len(book_dirs)} books to clean")
+    print(f"Found {len(book_dirs)} books")
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
