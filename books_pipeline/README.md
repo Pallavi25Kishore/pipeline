@@ -56,7 +56,7 @@ CSV + PDFs → OCR → Text Cleaning → Chunking → Embeddings → FAISS Index
    # Step 7: Load data
    python3 manage.py load_books --dry-run     # optional : Test first
    cd books_project
-   python3 manage.py load_books               # Load to db
+   python3 manage.py load_books               # Load to db / refer to commans in load_books.py
 
    # Step 8: Start web server
    python3 manage.py runserver 0.0.0.0:8000  # External access

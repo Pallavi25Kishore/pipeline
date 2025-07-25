@@ -14,19 +14,19 @@ from django.conf import settings
 from pathlib import Path
 
 # # First time - loads all books
+# python3 manage.py load_books
+
+# # Subsequent runs - only adds new books (adds new books, skips existing books, books in db but not in csv remain untouched)
 # python manage.py load_books
 
-# # Subsequent runs - only adds new books
-# python manage.py load_books
-
-# # Update existing books too
-# python manage.py load_books --update
+# # Update existing books too (adds new books, updates existing books, books in db but not in csv remain untouched)
+# python3 manage.py load_books --update
 
 # # Preview what would happen
-# python manage.py load_books --dry-run
+# python3 manage.py load_books --dry-run
 
-# # Force reload everything
-# python manage.py load_books --force
+# # Force reload everything (deletes all books from db, reloads everything from csv)
+# python3 manage.py load_books --force
 
 # Increase CSV field size limit
 csv.field_size_limit(sys.maxsize)

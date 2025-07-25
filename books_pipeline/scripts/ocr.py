@@ -166,7 +166,7 @@ if __name__ == "__main__":
 		print("Make sure you have PDFs in the input/pdfs/ folder")
 		sys.exit(1)
 
-	print(f"Found {len(files)} PDF files to process")
+	print(f"Found {len(files)} PDF")
 
 
 	print("\nChecking CSV and PDF name matching...")
@@ -285,3 +285,9 @@ if __name__ == "__main__":
 	print(f"Total time: {total_time/60:.1f} minutes")
 	print(f"\nOutput locations:")
 	print(f"Text files: {out}txts/")
+
+	if failed > 0:
+		print(f"\n⚠️  {failed} files failed processing")
+		sys.exit(1)  # Exit with error code
+	else:
+		sys.exit(0)  # Explicit success code
