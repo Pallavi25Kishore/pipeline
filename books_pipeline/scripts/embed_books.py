@@ -137,8 +137,8 @@ def process_cleaned_jsons(batch_size=3):
 
     if not os.path.exists(input_dir):
         print(f"Input directory not found: {input_dir}")
-        print("   Run text cleaning first: python scripts/02_clean_texts.py")
-        return None
+        print("   Run text cleaning first: python scripts/clean_txt.py")
+        return False
 
     json_files = [f for f in os.listdir(input_dir) if f.endswith('.json')]
 
@@ -149,12 +149,11 @@ def process_cleaned_jsons(batch_size=3):
 
     if not json_files:
         print("No new JSON files to process - all books already have embeddings!")
-        return None
+        return False
 
     print(f"Loading {len(json_files)} cleaned JSON files in batches of {batch_size}...")
 
     # Process in batches
-    all_book_embed_dicts = {}
 
     for batch_start in range(0, len(json_files), batch_size):
         batch_end = min(batch_start + batch_size, len(json_files))
@@ -197,7 +196,7 @@ def process_cleaned_jsons(batch_size=3):
         print(f"Loaded {len(batch_df)} pages from {len(batch_files)} books in this batch")
 
         # Process this batch through the pipeline
-        process_batch(batch_df, all_book_embed_dicts)
+        process_batch(batch_df)
 
         # Clear memory
         del dfs, batch_df
@@ -205,7 +204,7 @@ def process_cleaned_jsons(batch_size=3):
 
         print(f"Batch {batch_start//batch_size + 1} complete. Memory freed.")
 
-    return all_book_embed_dicts
+    return True
 
 def check_existing_embeddings():
     """
@@ -473,46 +472,54 @@ def save_embeddings_batch(embeddings_list, chunk_ids):
 
     print(f"Batch saved. Total embeddings now: {combined_embeddings.shape}")
 
-def process_batch(batch_df, all_book_embed_dicts):
+def process_batch(batch_df):
     """
     Process a batch of books through chunking and embedding
     """
-    # Step 1: Create chunks
-    print("Creating chunks for this batch...")
-    chunks_df = split_text(batch_df, text_column='text',
-                          doc_id_column='filename',
-                          para_id_column='page_num')
+    try:
+        # Step 1: Create chunks
+        print("Creating chunks for this batch...")
+        chunks_df = split_text(batch_df, text_column='text',
+                            doc_id_column='filename',
+                            para_id_column='page_num')
 
-    # Step 2: Add chunk IDs
-    print("Adding chunk IDs...")
-    chunks_df['chunk_id'] = 0
-    chunks_df.reset_index(drop=True, inplace=True)
+        # Step 2: Add chunk IDs
+        print("Adding chunk IDs...")
+        chunks_df['chunk_id'] = 0
+        chunks_df.reset_index(drop=True, inplace=True)
 
-    # Assign sequential chunk IDs per book
-    for i in tqdm(range(len(chunks_df)-1), desc="Assigning chunk IDs"):
-        if (chunks_df.loc[i, 'filename'] == chunks_df.loc[i+1, 'filename'] and
-            chunks_df.loc[i, 'page_num'] == chunks_df.loc[i+1, 'page_num']):
-            chunks_df.loc[i+1, 'chunk_id'] = chunks_df.loc[i, 'chunk_id'] + 1
+        # Assign sequential chunk IDs per book
+        for i in tqdm(range(len(chunks_df)-1), desc="Assigning chunk IDs"):
+            if (chunks_df.loc[i, 'filename'] == chunks_df.loc[i+1, 'filename'] and
+                chunks_df.loc[i, 'page_num'] == chunks_df.loc[i+1, 'page_num']):
+                chunks_df.loc[i+1, 'chunk_id'] = chunks_df.loc[i, 'chunk_id'] + 1
 
-    print(f"Created {len(chunks_df)} chunks in this batch")
-    print(f"Average chunk length: {chunks_df['length'].mean():.1f} words")
+        print(f"Created {len(chunks_df)} chunks in this batch")
+        print(f"Average chunk length: {chunks_df['length'].mean():.1f} words")
 
-    # Step 3: Create embeddings
-    embeddings_list, chunk_ids = create_embeddings(chunks_df)
+        # Step 3: Create embeddings
+        embeddings_list, chunk_ids = create_embeddings(chunks_df)
 
-    # Step 4: Save embeddings (append mode)
-    save_embeddings_batch(embeddings_list, chunk_ids)
+        # Step 4: Save embeddings (append mode)
+        save_embeddings_batch(embeddings_list, chunk_ids)
 
-    # Step 5: Create embed_id_dict for this batch
-    batch_embed_dicts = create_embed_id_dict(chunks_df)
+        # Step 5: Create embed_id_dict for this batch
+        batch_embed_dicts = create_embed_id_dict(chunks_df)
 
-    # Add to overall dictionary
-    all_book_embed_dicts.update(batch_embed_dicts)
+        # Step 6: Update CSV immediately for this batch
+        csv_updated = update_csv_with_embeddings(batch_embed_dicts)
+        if csv_updated is None:
+            print("WARNING: CSV update may have failed!")
+            sys.exit(1)
 
-    # Clear memory
-    del chunks_df, embeddings_list, chunk_ids
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-    gc.collect()
+        print("CSV updated successfully, clearing batch memory...")
+        del chunks_df, embeddings_list, chunk_ids, batch_embed_dicts
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        gc.collect()
+
+    except Exception as e:
+        print(f"Error processing batch: {e}")
+        sys.exit(1)
 
 def main():
     """
@@ -520,21 +527,25 @@ def main():
     """
     print("Starting Book Chunking and Embedding Pipeline")
 
-    # Add garbage collection
-    import gc
+    # Process in batches of 3 books
+    success = process_cleaned_jsons(batch_size=3)
 
-    # Process in batches of 5 books
-    all_book_embed_dicts = process_cleaned_jsons(batch_size=3)
-
-    if all_book_embed_dicts is None:
-        return
-
-    # Update CSV with all embed_id_dicts
-    updated_csv = update_csv_with_embeddings(all_book_embed_dicts)
+    if not success:
+        print("No embeddings were created")
+        sys.exit(1)
 
     print(f"\nEmbedding Pipeline Complete!")
-    print(f"Updated CSV: {updated_csv}")
     print(f"Embeddings saved for FAISS and Whoosh index creation")
+
+    # Final check of results
+    csv_path = "input/csv/books_with_embeddings.csv"
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        books_with_embeddings = sum(1 for d in df['embed_id_dict']
+                                   if pd.notna(d) and d != '' and d != '{}')
+        print(f"Total books with embeddings: {books_with_embeddings}/{len(df)}")
+
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
