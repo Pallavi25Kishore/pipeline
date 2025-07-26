@@ -196,7 +196,11 @@ def process_cleaned_jsons(batch_size=3):
         print(f"Loaded {len(batch_df)} pages from {len(batch_files)} books in this batch")
 
         # Process this batch through the pipeline
-        process_batch(batch_df)
+        batch_success = process_batch(batch_df)
+
+        if not batch_success:
+            print("Batch failed!")
+            return False
 
         # Clear memory
         del dfs, batch_df
@@ -517,9 +521,11 @@ def process_batch(batch_df):
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         gc.collect()
 
+        return True
+
     except Exception as e:
         print(f"Error processing batch: {e}")
-        sys.exit(1)
+        return False
 
 def main():
     """
@@ -544,6 +550,13 @@ def main():
         books_with_embeddings = sum(1 for d in df['embed_id_dict']
                                    if pd.notna(d) and d != '' and d != '{}')
         print(f"Total books with embeddings: {books_with_embeddings}/{len(df)}")
+
+        if books_with_embeddings == 0:
+                print("\n No books have embeddings!")
+                sys.exit(1)
+    else:
+        print("\n books_with_embeddings.csv was not created!")
+        sys.exit(1)
 
     sys.exit(0)
 
