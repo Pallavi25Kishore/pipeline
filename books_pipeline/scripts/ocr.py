@@ -166,7 +166,7 @@ if __name__ == "__main__":
 		print("Make sure you have PDFs in the input/pdfs/ folder")
 		sys.exit(1)
 
-	print(f"Found {len(files)} PDF")
+	print(f"Found {len(files)} PDF files")
 
 
 	print("\nChecking CSV and PDF name matching...")

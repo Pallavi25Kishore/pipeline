@@ -814,5 +814,11 @@ def main():
     print(f"\nOutput location:")
     print(f"Cleaned JSON files: {output_dir}")
 
+    if failed > 0:
+        print(f"\n⚠️  {failed} files failed processing")
+        sys.exit(1)
+    else:
+        sys.exit(0)
+
 if __name__ == "__main__":
     main()
